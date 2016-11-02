@@ -1,0 +1,211 @@
+<p>Chef is a mighty set of tools that can automate and verify your infrastructure, but its full power is a lot to digest. Most of us learn new tools by trying them out for an hour or two, and that's usually how we make a decision. Today I want to show how you can get real value out of Chef real fast, maybe on a Friday afternoon with a couple of hours set aside for experimenting, by replacing a shell script with a list of Chef declarations. Then we can run that list using <code>chef-apply</code>, which executes a Chef runlist in a single file.</p>
+
+<h3>A Brief Note</h3>
+
+<p>Before we get started, it's worth mentioning that even though I'm going to pretend Chef is a scripting language, a Chef runlist <strong>describes</strong> the desired final state of a system, rather than providing a list of actions to execute. In other words, each Chef resource triggers code like this:</p>
+
+<p>if system state already matches what the resource describes
+then
+don't do anything
+else
+perform whatever actions are needed to get the system into the correct state</p>
+
+<p>So if I tell Chef I want a file present, and specify its contents:</p>
+
+<p><code>ruby
+file "/tmp/foo" do
+  content "This will be the file's content."
+end
+</code></p>
+
+<p>Chef will check to see if the file is there with that content, and only update it (or create it) if needed.</p>
+
+<p>For the times when life doesn't fit that model, we have the <a href="https://docs.chef.io/resource_execute.html"><code>execute</code></a> resource to run some shell code. Even then, we can add a <code>not_if</code> or <code>only_if</code> condition to prevent it from executing on every Chef run.</p>
+
+<h3>You're still talking. You told me this would be useful.</h3>
+
+<p>Enough! It's Friday afternoon, I want to try out Chef, and I want to get something done!</p>
+
+<p>At home I run a music server called <code>squeezeboxserver</code>, and because later versions removed my favorite features, I use an older version that won't run on anything later than Ubuntu 11. I have an Ubuntu 10 virtual machine, using <a href="http://www.vagrantup.com">Vagrant</a> to manage the <a href="https://www.virtualbox.org">VirtualBox</a> VM. <code>squeezeboxserver</code> scans my music library and stores the file and playlist data in MySQL.</p>
+
+<p><code>squeezeboxserver</code> is very particular about its dependencies and configuration. I used its build scripts to build a Debian package, but it doesn't install any dependencies. It needs MySQL Server installed, but by default it runs its own <code>mysqld</code> rather than using a system-global <code>mysqld</code>. I originally wrote a Bash script to set the machine up:</p>
+
+<p><code>bash
+rm /etc/localtime
+ln -s /usr/share/zoneinfo/America/Los_Angeles /etc/localtime
+apt-get update
+export DEBIAN_FRONTEND=noninteractive
+apt-get -y install mysql-server-5.1 libmysqlclient16-dev mysql-client-5.1
+dpkg -i /home/chris/squeezebox/squeezeboxserver_7.5.6~32834_all.deb
+tar -C / -xf /home/chris/backups/sbserver_prefs.tar
+/etc/init.d/squeezeboxserver restart
+</code></p>
+
+<p>This mostly worked, but it's surprisingly brittle for an 8-line shell script. The VM still required a lot of manual tweaks, and it was actually fragile enough that I avoided taking the host server down for maintenance because I dreaded trying to bring the VM back up. It also wasn't reliable if any of those commands encountered an error--this happened far more often than I would have expected--and it didn't clearly communicate what it was doing. Deleting and re-creating the VM was similarly hazardous.</p>
+
+<p>With the most recent maintenance of my host server, I decided I'd had enough, and I converted it using <code>chef-apply</code>. <code>chef-apply</code> is a tool that ships with Chef, and it basically lets you pretend Chef is a scripting language: no recipes, no directory structure, just a single file of Chef resources. You can even shebang a <code>chef-apply</code> script as you would a shell script:</p>
+
+<p>```bash</p>
+
+<h1>!/usr/bin/env chef-apply</h1>
+
+<p>```</p>
+
+<p>I went through my original Bash script line by line to convert it to Chef.</p>
+
+<p><code>bash
+rm /etc/localtime
+ln -s /usr/share/zoneinfo/America/Los_Angeles /etc/localtime
+</code></p>
+
+<p>There are a few ways to set your machine's timezone; this just happens to be the one I'm familiar with. Easy enough, Chef has a <a href="https://docs.chef.io/resource_link.html"><code>link</code></a> resource.</p>
+
+<p><code>ruby
+link "/etc/localtime" do
+    to "/usr/share/zoneinfo/America/Los_Angeles"
+end
+</code></p>
+
+<p>Here I'm telling Chef "the correct state of the server has this symlink"; Chef will check to see if the symlink already exists, and do nothing if it's already there and pointing to the right file.</p>
+
+<p><code>bash
+export DEBIAN_FRONTEND=noninteractive
+apt-get -y install mysql-server-5.1 libmysqlclient16-dev mysql-client-5.1
+</code></p>
+
+<p>Chef's <a href="https://docs.chef.io/resource_package.html"><code>package</code></a> resource has us covered.</p>
+
+<p><code>ruby
+package mysql-server-5.1
+package libmysqlclient16-dev
+package mysql-client-5.1
+</code></p>
+
+<p>Or, if you're comfortable with Ruby and you don't like the repetition, you can do it with a loop which does the exact same thing.</p>
+
+<p><code>ruby
+["mysql-server-5.1", "libmysqlclient16-dev", "mysql-client-5.1"].each do |pkg_name|
+    package pkg_name
+end
+</code></p>
+
+<p>But wait-installing <code>mysql-server-5.1</code> starts the system <code>mysqld</code>. I could stop it (<code>service mysql stop</code>) but then it will restart whenever I reboot the VM. I'm a software engineer, not a sysadmin, so I'm far too lazy to figure out how to permanently disable the system <code>mysqld</code>. Chef's <a href="https://docs.chef.io/resource_service.html"><code>service</code></a> resource has an action for this.</p>
+
+<p><code>ruby
+service "mysql" do
+    action :disable
+end
+</code></p>
+
+<p>Now <code>mysqld</code> won't start up on system boot.</p>
+
+<p>So much for the prep work. Now to install and configure <code>squeezeboxserver</code> itself.</p>
+
+<p><code>bash
+dpkg -i /home/chris/squeezebox/squeezeboxserver_7.5.6~32834_all.deb
+</code></p>
+
+<p>Here we encounter our first diversion, which merits some background. Chef <strong>resources</strong> are backed by <strong>providers</strong>, where the actual heavy lifting of a Chef resource happens. When we wrote <code>package mysql-client-5.1</code> above, we didn't have to concern ourselves with what operating system we were on: Chef will figure it out and call the correct provider for your system. On a RedHat-based system, this is the <code>yum</code> provider, and on Debian-based systems, of course, the <code>package</code> resource resolves to the <code>apt</code> provider. As a result, to install from a <code>.deb</code> file, I had to use the <a href="https://docs.chef.io/resource_dpkg_package.html"><code>dpkg_package</code></a> resource, which explicitly uses the <code>dpkg</code> provider.</p>
+
+<p><code>ruby
+dpkg_package "squeezeboxserver_7.5.6" do
+    source "/home/chris/squeezebox/squeezeboxserver_7.5.6~32834_all.deb"
+end
+</code></p>
+
+<p>The <code>.deb</code> file leaves the server running, but I've been running <code>squeezeboxserver</code> for a long time, and I have a <code>.tar</code> of prefs files I want to use.</p>
+
+<p><code>bash
+tar -C / -xf /home/chris/backups/sbserver_prefs.tar
+</code></p>
+
+<p>This is not so bad, and in fact there is no core <code>tar</code> resource, so I just move it verbatim into Chef with the <code>execute</code> resource. (There's a <code>tar</code> cookbook, but it's Friday afternoon and I don't want anything complicated.) Normally we use Chef resources to describe our desired final state; sometimes that's not enough, so we have <code>execute</code>, which essentially shells out a command.</p>
+
+<p><code>ruby
+execute "tar -C / -xf /home/chris/backups/squeezeboxserver.tar"
+</code></p>
+
+<p>Then,
+Now restart the server, and tell it to scan my music collection to populate the MySQL database.</p>
+
+<p><code>bash
+/etc/init.d/squeezeboxserver restart
+</code></p>
+
+<p>Easy enough. Tell Chef to disable, then re-enable the service.</p>
+
+<p><code>bash
+service "squeezeboxserver" do
+    action :restart
+end
+</code></p>
+
+<p>And...that's it.</p>
+
+<p>Since I was on a roll, I decided to add some cronjobs, since Chef makes managing cronjobs trivial. It's such trouble to modify crontabs safely in Bash that I had never bothered trying.</p>
+
+<p><code>ruby
+cron "backup_config" do
+    minute "0"
+    hour "0"
+    user "vagrant"
+    command "tar -C / -cf /home/chris/backups/sbserver_prefs.tar /var/lib/squeezeboxserver/prefs"
+end
+</code></p>
+
+<p>A couple more like that, and now I have up-to-date backups of the config, the playlists, and the MySQL data. Boom. I deleted and re-created the VM a few times-once or twice, it was just for fun. Chef re-built it identically every time. If something goes wrong, wonder of wonders, it stops and tells me. It's true, the <code>chef-apply</code> script has a few more lines in it. It's also more reliable and has more features than the original.</p>
+
+<p>The deep truth about Chef is that it's not doing anything clever, which is a real relief to those of us who think "clever" means "hard to debug." It's simply doing all the checking ("is this file present and with the right contents?") and cross-platform implementation ("use apt-get on Debian, Yum on RHEL, pkg_add/pkgng on FreeBSD...") that we would find tedious and error-prone. It does all this always and only in the order we tell it to.</p>
+
+<p><code>chef-apply</code> is sort of "Chef Lite": Chef's quick-hack, Get Stuff Done tool. You definitely don't want to run your whole infrastructure on it. It runs just a single file, with no cookbooks, file templates, roles, users, orgs, or any of the other Chef features you'd want in your automation. When you're ready for the full power of Chef, you have a foundation of cross-platform code you can copy into your recipes.</p>
+
+<p>I've included the full <code>chef-apply</code> script below. Happy hacking!</p>
+
+<p>```ruby
+link "/etc/localtime" do
+  to "/usr/share/zoneinfo/America/Los<em>Angeles"
+end
+package mysql-server-5.1
+package libmysqlclient16-dev
+package mysql-client-5.1
+service "mysql" do
+  action :disable
+end
+dpkg</em>package "squeezeboxserver_7.5.6" do
+  source "/home/chris/squeezebox/#{DEB}"
+end</p>
+
+<h1>o/~ meet the new server / same as the old server o/~</h1>
+
+<p>execute "tar -C / -xf /home/chris/backups/sbserver_prefs.tar"
+service "squeezeboxserver" do
+  action :restart
+end</p>
+
+<h1>---- end app setup ----</h1>
+
+<p>cron "nightly<em>rescan" do
+  minute "30"
+  hour "0"
+  user "vagrant"
+  command "/usr/sbin/squeezeboxserver-scanner --rescan"
+end
+cron "backup</em>config" do
+  minute "0"
+  hour "0"
+  user "vagrant"
+  command "tar -C / -cf /home/chris/backups/sbserver<em>prefs.tar /var/lib/squeezeboxserver/prefs"
+end
+cron "backup</em>mysql" do
+  minute "5"
+  hour "0"
+  user "vagrant"
+  command "sudo mysqldump -S #{MYSQL<em>SOCK} slimserver | gzip -c > /home/chris/backups/sbserver</em>sql.tgz"
+end
+cron "backup_playlists" do
+  minute "10"
+  hour "0"
+  user "vagrant"
+  command "tar -cf /home/chris/backups/playlists.tar /home/chris/music/playlists"
+end
+```</p>
