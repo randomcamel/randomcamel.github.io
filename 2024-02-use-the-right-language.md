@@ -35,7 +35,7 @@ I don't think George was a "bad kid," whatever that means. I don't know why he w
 1. Talking to him at best did nothing, and seemed to make things worse.
 2. The moment I punched him, he started to see me as a peer.
 
-![Hulk punches Thor in a friendly way](hulk-and-thor-punchx.gif "Hulk punches Thor in a friendly way")
+![Hulk punches Thor in a friendly way](hulk-and-thor-punch.gif "Hulk punches Thor in a friendly way")
 
 For the two of us, right then, violence was the answer because *that was the language he could hear*. He couldn't, or wouldn't, be flexible enough to listen to other approaches. I had to express my boundaries physically.
 
